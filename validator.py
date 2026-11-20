@@ -13,6 +13,10 @@ def clean_spaces(value: str) -> str:
 def normalize_full_name(full_name: str) -> str:
     """Очищает пробелы и делает каждое слово в ФИО с заглавной буквы."""
     cleaned = clean_spaces(full_name)
+
+
+
+    dfd
     return " ".join(word.capitalize() for word in cleaned.split())
 
 
