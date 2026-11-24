@@ -16,37 +16,45 @@ from sqlalchemy.exc import IntegrityError
 Base = declarative_base()
 
 
-# 1. Таблица учебных групп
+# 1. Базовая таблица пользователей (общие данные: ФИО и роль)
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    full_name = Column(String, nullable=False)
+    role = Column(String, nullable=False)  # 'student' или 'teacher'
+
+
+# 2. Таблица учебных групп
 class Group(Base):
     __tablename__ = "groups"
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, unique=True, nullable=False)
 
 
-# 2. Таблица студентов
+# 3. Таблица студентов (расширяет User, связь 1:1 через user_id)
 class Student(Base):
     __tablename__ = "students"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    full_name = Column(String, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
     record_book = Column(String, unique=True, nullable=False)
     group_id = Column(Integer, ForeignKey("groups.id"), nullable=False)
 
 
-# 3. Таблица преподавателей
+# 4. Таблица преподавателей (расширяет User, связь 1:1 через user_id)
 class Teacher(Base):
     __tablename__ = "teachers"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    full_name = Column(String, unique=True, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
 
 
-# 4. Таблица дисциплин (предметов)
+# 5. Таблица дисциплин (предметов)
 class Subject(Base):
     __tablename__ = "subjects"
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String, unique=True, nullable=False)
 
 
-# 5. Справочник видов оценок
+# 6. Справочник видов оценок
 class GradeType(Base):
     __tablename__ = "grade_types"
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -54,7 +62,7 @@ class GradeType(Base):
     is_passed = Column(Boolean, nullable=False, default=False)
 
 
-# 6. Журнал загрузок ведомостей
+# 7. Журнал загрузок ведомостей
 class ImportLog(Base):
     __tablename__ = "import_logs"
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -64,7 +72,7 @@ class ImportLog(Base):
     rejected_count = Column(Integer, nullable=False)
 
 
-# 7. Главная таблица оценок (связывает все справочники)
+# 8. Главная таблица оценок (связывает все справочники)
 class Grade(Base):
     __tablename__ = "grades"
 
@@ -119,34 +127,65 @@ class Database:
         return instance
 
     def insert_grade(self, record: dict) -> bool:
-        """Раскладывает данные по 7 таблицам и сохраняет оценку."""
+        """
+        Раскладывает данные по 8 таблицам (с базовым User) и сохраняет оценку.
+        Возвращает False, если запись является дубликатом.
+        """
         try:
+            # 1. Учебная группа
             group = self._get_or_create(Group, name=record["group"])
 
-            student = self.session.query(Student).filter_by(
-                record_book=record["record_book"]
-            ).first()
+            # 2. Студент + его базовая запись в User (ищем по уникальной зачетке)
+            student = (
+                self.session.query(Student)
+                .filter_by(record_book=record["record_book"])
+                .first()
+            )
             if not student:
+                student_user = User(full_name=record["full_name"], role="student")
+                self.session.add(student_user)
+                self.session.flush()
+
                 student = Student(
-                    full_name=record["full_name"],
+                    user_id=student_user.id,
                     record_book=record["record_book"],
                     group_id=group.id,
                 )
                 self.session.add(student)
                 self.session.flush()
 
-            teacher = self._get_or_create(Teacher, full_name=record["teacher"])
+            # 3. Преподаватель + его базовая запись в User
+            teacher = (
+                self.session.query(Teacher)
+                .join(User, Teacher.user_id == User.id)
+                .filter(User.full_name == record["teacher"], User.role == "teacher")
+                .first()
+            )
+            if not teacher:
+                teacher_user = User(full_name=record["teacher"], role="teacher")
+                self.session.add(teacher_user)
+                self.session.flush()
+
+                teacher = Teacher(user_id=teacher_user.id)
+                self.session.add(teacher)
+                self.session.flush()
+
+            # 4. Дисциплина
             subject = self._get_or_create(Subject, name=record["subject"])
 
-            grade_type = self.session.query(GradeType).filter_by(
-                value=record["grade"]
-            ).first()
+            # 5. Вид оценки из справочника
+            grade_type = (
+                self.session.query(GradeType)
+                .filter_by(value=record["grade"])
+                .first()
+            )
             if not grade_type:
                 is_passed = record["grade"] in ("3", "4", "5", "зачет")
                 grade_type = self._get_or_create(
                     GradeType, value=record["grade"], is_passed=is_passed
                 )
 
+            # 6. Главная запись об оценке
             new_grade = Grade(
                 student_id=student.id,
                 subject_id=subject.id,
@@ -212,5 +251,5 @@ class Database:
 
 if __name__ == "__main__":
     db = Database()
-    print("База данных из 7 связанных таблиц создана!")
+    print("Готово! База данных создана!")
     db.close()
