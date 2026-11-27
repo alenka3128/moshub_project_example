@@ -10,7 +10,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
-from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.orm import declarative_base, sessionmaker, aliased
 from sqlalchemy.exc import IntegrityError
 
 Base = declarative_base()
@@ -21,7 +21,7 @@ class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, autoincrement=True)
     full_name = Column(String, nullable=False)
-    role = Column(String, nullable=False)  # 'student' или 'teacher'
+    role = Column(String, nullable=False)
 
 
 # 2. Таблица учебных групп
@@ -127,15 +127,10 @@ class Database:
         return instance
 
     def insert_grade(self, record: dict) -> bool:
-        """
-        Раскладывает данные по 8 таблицам (с базовым User) и сохраняет оценку.
-        Возвращает False, если запись является дубликатом.
-        """
+        """Раскладывает данные по 8 таблицам (с базовым User) и сохраняет оценку."""
         try:
-            # 1. Учебная группа
             group = self._get_or_create(Group, name=record["group"])
 
-            # 2. Студент + его базовая запись в User (ищем по уникальной зачетке)
             student = (
                 self.session.query(Student)
                 .filter_by(record_book=record["record_book"])
@@ -154,7 +149,6 @@ class Database:
                 self.session.add(student)
                 self.session.flush()
 
-            # 3. Преподаватель + его базовая запись в User
             teacher = (
                 self.session.query(Teacher)
                 .join(User, Teacher.user_id == User.id)
@@ -170,10 +164,8 @@ class Database:
                 self.session.add(teacher)
                 self.session.flush()
 
-            # 4. Дисциплина
             subject = self._get_or_create(Subject, name=record["subject"])
 
-            # 5. Вид оценки из справочника
             grade_type = (
                 self.session.query(GradeType)
                 .filter_by(value=record["grade"])
@@ -185,7 +177,6 @@ class Database:
                     GradeType, value=record["grade"], is_passed=is_passed
                 )
 
-            # 6. Главная запись об оценке
             new_grade = Grade(
                 student_id=student.id,
                 subject_id=subject.id,
@@ -244,12 +235,47 @@ class Database:
             "pass_rate": pass_rate,
         }
 
+    def get_all_grades(self) -> list[dict]:
+        """Возвращает все принятые оценки с расшифровкой из всех справочников."""
+        StudentUser = aliased(User)
+        TeacherUser = aliased(User)
+
+        rows = (
+            self.session.query(
+                StudentUser.full_name,
+                Student.record_book,
+                Subject.name,
+                Group.name,
+                TeacherUser.full_name,
+                Grade.exam_date,
+                GradeType.value,
+            )
+            .select_from(Grade)
+            .join(Student, Grade.student_id == Student.id)
+            .join(StudentUser, Student.user_id == StudentUser.id)
+            .join(Group, Student.group_id == Group.id)
+            .join(Subject, Grade.subject_id == Subject.id)
+            .join(Teacher, Grade.teacher_id == Teacher.id)
+            .join(TeacherUser, Teacher.user_id == TeacherUser.id)
+            .join(GradeType, Grade.grade_type_id == GradeType.id)
+            .order_by(Grade.id)
+            .all()
+        )
+
+        result = []
+        for fio, rb, subj, grp, teach, dt, gr in rows:
+            grade_val = int(gr) if gr.isdigit() else gr
+            result.append({
+                "full_name": fio,
+                "record_book": rb,
+                "subject": subj,
+                "group": grp,
+                "teacher": teach,
+                "date": dt,
+                "grade": grade_val,
+            })
+        return result
+
     def close(self):
         self.session.close()
         self.engine.dispose()
-
-
-if __name__ == "__main__":
-    db = Database()
-    print("Готово! База данных создана!")
-    db.close()

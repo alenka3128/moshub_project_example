@@ -1,76 +1,108 @@
 import subprocess
 import sys
-import pytest
 from pathlib import Path
-from validator import check_grade, check_not_empty
-from database import Database
+import pytest
 
 
-# --- 1. Паттерн PageObject для консольного интерфейса (CLI) ---
-class ParserCLIPage:
-    """Обертка над запуском существующего скрипта parsers.py из терминала."""
+class AppCLIPage:
+    """PageObject для взаимодействия с консольным приложением app.py."""
 
-    def __init__(self, script_path: str = "parsers.py"):
+    def __init__(self, tmp_path: Path, script_path: str = "app.py"):
+        self.tmp_path = tmp_path
         self.script_path = script_path
+        self.db_path = tmp_path / "test_cli.db"
+        self.last_result = None
 
-    def parse_file(self, file_path: str | Path):
-        """Запускает обработку ведомости через консоль и возвращает результат."""
-        return subprocess.run(
-            [sys.executable, "-X", "utf8", self.script_path, str(file_path)],
+    def create_csv(self, filename: str, rows: list[str]) -> Path:
+        """Создает временный CSV-файл с шапкой и переданными строками."""
+        file_path = self.tmp_path / filename
+        header = "ФИО,Зачетка,Предмет,Группа,Преподаватель,Дата,Оценка"
+        content = "\n".join([header] + rows)
+        file_path.write_text(content, encoding="utf-8")
+        return file_path
+
+    def run_import(self, file_path: str | Path):
+        """Запускает app.py в консоли и сохраняет результат выполнения."""
+        self.last_result = subprocess.run(
+            [sys.executable, "-X", "utf8", self.script_path, str(file_path), str(self.db_path)],
             capture_output=True,
             text=True,
             encoding="utf-8",
             errors="replace",
         )
+        return self
+
+    @property
+    def output(self) -> str:
+        """Возвращает весь текст, который программа вывела в консоль."""
+        if not self.last_result:
+            return ""
+        return (self.last_result.stdout or "") + (self.last_result.stderr or "")
+
+    @property
+    def return_code(self) -> int:
+        return self.last_result.returncode if self.last_result else -1
 
 
-# --- 2. 5 тестов на исключения и ошибочные сценарии ---
+# --- 5 консольных тестов на исключения через PageObject ---
 
-def test_exception_letters_instead_of_number():
-    """Исключение 1: Буквы вместо числа в оценке."""
-    with pytest.raises(ValueError, match="недопустима"):
-        check_grade("пять")
+def test_cli_exception_letters_instead_of_grade(tmp_path):
+    """Тест 1 (CLI): Буквы вместо числа в оценке."""
+    cli = AppCLIPage(tmp_path)
+    csv_file = cli.create_csv("letters.csv", [
+        "Иванов Иван,22-ИВТ-01,Базы данных,ИВТ-22,Петров П.П.,15.10.2026,пять"
+    ])
 
+    cli.run_import(csv_file)
 
-def test_exception_empty_string():
-    """Исключение 2: Пустая строка в обязательном поле."""
-    with pytest.raises(ValueError, match="не может быть пустым"):
-        check_not_empty("   ", "ФИО")
-
-
-def test_exception_negative_number():
-    """Исключение 3: Отрицательное число в оценке."""
-    with pytest.raises(ValueError, match="недопустима"):
-        check_grade("-5")
+    assert "Отклонено: 1" in cli.output
+    assert "недопустима" in cli.output.lower()
 
 
-def test_exception_invalid_file_path(tmp_path):
-    """Исключение 4: Неверный путь к несуществующему файлу через CLI PageObject."""
-    cli = ParserCLIPage(script_path="parsers.py")
-    fake_file = tmp_path / "nesushestvuyushiy_file.csv"
+def test_cli_exception_empty_field(tmp_path):
+    """Тест 2 (CLI): Пустая строка в обязательном поле (ФИО)."""
+    cli = AppCLIPage(tmp_path)
+    csv_file = cli.create_csv("empty.csv", [
+        "   ,22-ИВТ-02,Базы данных,ИВТ-22,Петров П.П.,15.10.2026,5"
+    ])
 
-    result = cli.parse_file(fake_file)
+    cli.run_import(csv_file)
 
-    # Программа должна завершиться с кодом ошибки (не 0) и сообщить, что файл не найден
-    assert result.returncode != 0
-    assert "не найден" in (result.stderr or "").lower()
-
+    assert "Отклонено: 1" in cli.output
+    assert "не может быть пустым" in cli.output.lower()
 
 
-def test_exception_duplicate_record():
-    """Исключение 5: Попытка добавить дубликат записи."""
-    db = Database(":memory:")
-    record = {
-        "full_name": "Иванов Иван Иванович",
-        "record_book": "22-ИВТ-01",
-        "subject": "Базы данных",
-        "group": "ИВТ-22",
-        "teacher": "Петров П.П.",
-        "date": "2026-10-10",
-        "grade": "5",
-    }
+def test_cli_exception_negative_grade(tmp_path):
+    """Тест 3 (CLI): Отрицательное число в оценке (-5)."""
+    cli = AppCLIPage(tmp_path)
+    csv_file = cli.create_csv("negative.csv", [
+        "Сидорова Анна,22-ИВТ-03,Базы данных,ИВТ-22,Петров П.П.,15.10.2026,-5"
+    ])
 
-    assert db.insert_grade(record) is True
-    # Повторная вставка должна быть отклонена
-    assert db.insert_grade(record) is False
-    db.close()
+    cli.run_import(csv_file)
+
+    assert "Отклонено: 1" in cli.output
+    assert "недопустима" in cli.output.lower()
+
+
+def test_cli_exception_invalid_file_path(tmp_path):
+    """Тест 4 (CLI): Передача несуществующего пути к файлу в консоль."""
+    cli = AppCLIPage(tmp_path)
+    missing_file = tmp_path / "no_such_file.csv"
+
+    cli.run_import(missing_file)
+
+    assert cli.return_code != 0
+    assert "не найден" in cli.output.lower()
+
+
+def test_cli_exception_duplicate_record(tmp_path):
+    """Тест 5 (CLI): Попытка повторно загрузить дубликат через консоль."""
+    cli = AppCLIPage(tmp_path)
+    row = "Козлов Дмитрий,22-ИВТ-04,Базы данных,ИВТ-22,Петров П.П.,15.10.2026,4"
+    csv_file = cli.create_csv("duplicate.csv", [row, row])
+
+    cli.run_import(csv_file)
+
+    assert "Принято: 1, Отклонено: 1" in cli.output
+    assert "дубликат" in cli.output.lower()
