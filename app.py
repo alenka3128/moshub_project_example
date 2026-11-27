@@ -1,14 +1,26 @@
+"""app.py - главная программа импорта ведомостей.
+Кроссплатформенная: macOS, Linux, Windows"""
 import sys
 from pathlib import Path
+
 from database import Database
 from importer import run_import
 from quarantine import Quarantine
 from seed_data import generate_100_records
-from excel_export import export_to_excel
+
+# Корень проекта: база и карантин всегда рядом с app.py,
+# независимо от того, из какой папки запущена программа.
+BASE_DIR = Path(__file__).resolve().parent
+DEFAULT_DB = BASE_DIR / "data" / "vedomosti.db"
+
+
+def clean_path(raw: str) -> str:
+    text = raw.strip().strip('\'"')
+    return str(Path(text).expanduser()) if text else ""
 
 
 def select_file_path() -> str:
-    """Открывает окно проводника или запрашивает путь в консоли."""
+    """Открывает окно проводника или запрашивает путь в консоли"""
     try:
         import tkinter as tk
         from tkinter import filedialog
@@ -22,27 +34,28 @@ def select_file_path() -> str:
         )
         root.destroy()
         if path:
-            return path
+            return clean_path(path)
     except Exception:
-        pass
-    return input("Введите путь к файлу ведомости: ").strip().strip('"')
+        pass  # нет графического режима - спросим путь текстом
+    return clean_path(input("Введите путь к файлу ведомости: "))
 
 
 def main():
-    # Второй аргумент (если передан из тестов) — путь к БД, иначе основная
-    db_path = sys.argv[2] if len(sys.argv) >= 3 else "data/vedomosti.db"
-    db = Database(db_path)
+    # Второй аргумент (если передан из тестов) - путь к БД, иначе основная.
+    db_path = Path(sys.argv[2]) if len(sys.argv) >= 3 else DEFAULT_DB
 
-    # 1. Если основная база пустая — наполняем её на 100 записей через Faker
-    if db_path == "data/vedomosti.db" and db.get_statistics()["total"] == 0:
+    db = Database(str(db_path))
+
+    # 1. Если основная база пустая - наполняем её на 100 записей через Faker
+    if db_path == DEFAULT_DB and db.get_statistics()["total"] == 0:
         print("База данных пуста. Генерируем 100 тестовых записей через Faker...")
         db.close()
-        generate_100_records(db_path)
-        db = Database(db_path)
+        generate_100_records(str(db_path))
+        db = Database(str(db_path))
 
     # 2. Получаем путь к файлу (из первого аргумента или через выбор файла)
     if len(sys.argv) >= 2:
-        raw_path = sys.argv[1]
+        raw_path = clean_path(sys.argv[1])
     else:
         print("\nВыберите файл ведомости (.csv или .txt) для загрузки...")
         raw_path = select_file_path()
@@ -80,17 +93,25 @@ def main():
     print(f"Всего оценок в базе: {stats['total']}")
     print(f"Распределение оценок: {dist_str}")
     print(f"Процент успевающих: {stats['pass_rate']}%")
-    
-    # 4. Выгрузка в Excel (пункт меню / автоматический вопрос при интерактивном запуске)
-    if len(sys.argv) < 2 or "--excel" in sys.argv:
-        choice = input("\nВыгрузить данные в Excel (out/vedomost.xlsx)? [y/n]: ").strip().lower()
-        if choice in ("y", "д", "да", "yes", ""):
-            out_path = export_to_excel(
-                grades=db.get_all_grades(),
-                quarantine_csv=Path(db_path).parent / "rejected.csv",
-                output_path="out/vedomost.xlsx",
-            )
-            print(f"Готово! Отчёт успешно выгружен в {out_path}")
+
+    # 4. Выгрузка в Excel (только при интерактивном запуске; если модуль
+    # excel_export ещё не написан - программа не падает, просто пропускает).
+    if len(sys.argv) < 2:
+        try:
+            from excel_export import export_to_excel
+        except ImportError:
+            print("\n(Модуль excel_export не найден - выгрузка в Excel пропущена)")
+        else:
+            choice = input(
+                "\nВыгрузить данные в Excel (out/vedomost.xlsx)? [y/n]: "
+            ).strip().lower()
+            if choice in ("y", "д", "да", "yes", ""):
+                out_path = export_to_excel(
+                    grades=db.get_all_grades(),
+                    quarantine_csv=Path(db_path).parent / "rejected.csv",
+                    output_path=str(BASE_DIR / "out" / "vedomost.xlsx"),
+                )
+                print(f"Готово! Отчёт успешно выгружен в {out_path}")
 
     db.close()
 
